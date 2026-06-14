@@ -34,6 +34,15 @@ else:
 # ---- CONFIG ----------------------------------------------------------------
 SELECT_PERIOD = 2.5        # secondes entre deux sélections (défaut ; éditable en ms dans le bot)
 PERIOD_FILE = os.path.join(BASE_DIR, "period_ms.txt")
+# --- laisse / retour a la maison (rester dans un rayon autour du point de depart) ---
+LEASH_RANGE = 70           # rayon (unites X/Y) ; au-dela -> retour. Editable dans le bot
+LEASH_FILE = os.path.join(BASE_DIR, "leash.txt")
+LEASH_INNER = 15           # "rentre" quand a moins de ca de la maison
+CAST_SETTLE = 0.7          # attente pour finir le sort en cours avant de bouger
+MOVE_SETTLE = 0.85         # attente apres un clic de deplacement (le perso marche)
+CAL_STEP = 160             # px des 2 clics de calibration
+MOVE_MIN, MOVE_MAX = 110, 200   # rayon px d'un clic de deplacement
+RETURN_STEPS = 16          # nb max de clics pour rentrer
 KEY_DELAY = 0.04           # délai entre touches de sort (comme ton AHK)
 # touches de sorts = AZERTY & é " ' ( - _  (slots 1,2,3,4,5,6,8)
 SPELL_KEYS = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x38]
@@ -102,7 +111,8 @@ C_STOP = "#c0552c"         # rouge brique (arrêté)
 
 state = {"running": False, "target": None, "attacks": 0, "selects": 0,
          "blobs": 0, "winrect": None, "giant": False, "gold": 0,
-         "period": SELECT_PERIOD, "xy": ("--", "--")}
+         "period": SELECT_PERIOD, "xy": ("--", "--"),
+         "leash": LEASH_RANGE, "home": None, "returning": False, "cal": None}
 _stop = False
 
 
@@ -397,6 +407,22 @@ def save_period(ms):
         pass
 
 
+def load_leash():
+    try:
+        with open(LEASH_FILE, encoding="utf-8") as f:
+            return max(15, int(f.read().strip()))
+    except Exception:
+        return LEASH_RANGE
+
+
+def save_leash(v):
+    try:
+        with open(LEASH_FILE, "w", encoding="utf-8") as f:
+            f.write(str(int(v)))
+    except Exception:
+        pass
+
+
 def hotkey_loop():
     """Fast, dedicated F8/F7/F10 polling so a quick press is never missed."""
     global _stop
@@ -421,6 +447,97 @@ def hotkey_loop():
         time.sleep(0.015)
 
 
+def _xy_num():
+    """Coords courantes (depuis la GUI) en nombres, ou None."""
+    xs, ys = state.get("xy", ("--", "--"))
+    if xs.isdigit() and ys.isdigit():
+        return int(xs), int(ys)
+    return None
+
+
+def _cur_xy(sct, mon, w, h):
+    """Lecture FRAICHE des coords (grab + OCR), ou None."""
+    try:
+        f = np.array(sct.grab(mon))[:, :, :3][:, :, ::-1]
+        xs, ys = read_xy(f, w, h)
+        if xs.isdigit() and ys.isdigit():
+            return int(xs), int(ys)
+    except Exception:
+        pass
+    return None
+
+
+def _moveclick(mon, w, h, sx, sy):
+    """Clic au sol a (centre + offset ecran)."""
+    click(mon["left"] + w // 2 + int(sx), mon["top"] + h // 2 + int(sy))
+
+
+def _calibrate(sct, mon, w, h):
+    """2 clics-test (haut puis droite) -> matrice inverse ecran<-monde dans state['cal']."""
+    p0 = _cur_xy(sct, mon, w, h)
+    if not p0:
+        return False
+    _moveclick(mon, w, h, 0, -CAL_STEP); time.sleep(MOVE_SETTLE)
+    p1 = _cur_xy(sct, mon, w, h)
+    if not p1:
+        return False
+    vup = (p1[0] - p0[0], p1[1] - p0[1])
+    _moveclick(mon, w, h, CAL_STEP, 0); time.sleep(MOVE_SETTLE)
+    p2 = _cur_xy(sct, mon, w, h)
+    if not p2:
+        return False
+    vr = (p2[0] - p1[0], p2[1] - p1[1])
+    # A (offset ecran -> delta monde) : colonne sx = vr/STEP, colonne sy = -vup/STEP
+    a, c = vr[0] / CAL_STEP, vr[1] / CAL_STEP
+    b, d = -vup[0] / CAL_STEP, -vup[1] / CAL_STEP
+    det = a * d - b * c
+    if abs(det) < 1e-6:                          # mouvement nul/degenere
+        return False
+    state["cal"] = (d / det, -b / det, -c / det, a / det)   # A^-1
+    return True
+
+
+def return_home(sct, mon, w, h):
+    """Ramene le perso a moins de LEASH_INNER de la maison (clics au sol + feedback)."""
+    state["returning"] = True
+    try:
+        time.sleep(CAST_SETTLE)                  # laisse finir le sort en cours
+        if state["cal"] is None and not _calibrate(sct, mon, w, h):
+            return
+        prev, stalls = None, 0
+        for _ in range(RETURN_STEPS):
+            if _stop or not state["running"]:
+                return
+            pos = _cur_xy(sct, mon, w, h)
+            if not pos or not state["home"]:
+                return
+            hx, hy = state["home"]
+            d = ((pos[0] - hx) ** 2 + (pos[1] - hy) ** 2) ** 0.5
+            if d <= LEASH_INNER:
+                return                           # rentre
+            if prev is not None and d >= prev - 1:   # pas plus pres -> bloque/mauvais sens
+                stalls += 1
+                if stalls >= 2:
+                    state["cal"] = None
+                    if not _calibrate(sct, mon, w, h):
+                        return
+                    stalls, prev = 0, None
+                    continue
+            else:
+                stalls = 0
+            prev = d
+            ai = state["cal"]
+            wx, wy = hx - pos[0], hy - pos[1]
+            sx = ai[0] * wx + ai[1] * wy
+            sy = ai[2] * wx + ai[3] * wy
+            mag = (sx * sx + sy * sy) ** 0.5 or 1.0
+            k = max(MOVE_MIN, min(MOVE_MAX, mag)) / mag
+            _moveclick(mon, w, h, sx * k, sy * k)
+            time.sleep(MOVE_SETTLE)
+    finally:
+        state["returning"] = False
+
+
 def action_loop():
     """Spell spam + mob selection while running. Checks the flag between keys."""
     sct = mss.MSS()
@@ -430,9 +547,20 @@ def action_loop():
     recent = []                                   # dernières positions cliquées
     while not _stop:
         if not state["running"]:
+            state["home"] = None                  # re-ancre la maison au prochain Start
             time.sleep(0.04)
             continue
         try:
+            # ancre la maison au demarrage, puis surveille la laisse
+            cur = _xy_num()
+            if cur:
+                if state["home"] is None:
+                    state["home"] = cur
+                else:
+                    hx, hy = state["home"]
+                    if (cur[0] - hx) ** 2 + (cur[1] - hy) ** 2 > state["leash"] ** 2:
+                        return_home(sct, mon, w, h)   # stoppe le spam et rentre
+                        continue
             for vk in SPELL_KEYS:                 # spam des sorts
                 if not state["running"]:
                     break
@@ -469,15 +597,16 @@ def main():
     root.title("KrallBot")
     root.configure(bg=C_EDGE)
     root.attributes("-topmost", True)
-    root.geometry("280x300+20+20")
+    root.geometry("280x345+20+20")
     state["period"] = load_period() / 1000.0
+    state["leash"] = load_leash()
 
     # cadre or -> panneau bois (bordure dorée façon fenêtre SRO)
     panel = tk.Frame(root, bg=C_PANEL, highlightbackground=C_EDGE,
                      highlightthickness=2)
     panel.pack(fill="both", expand=True, padx=3, pady=3)
 
-    tk.Label(panel, text="✦ KrallBot ✦ (AMK)", bg=C_PANEL, fg=C_GOLD,
+    tk.Label(panel, text="KrallBot (AMK)", bg=C_PANEL, fg=C_GOLD,
              font=("Trajan Pro", 13, "bold")).pack(pady=(10, 0))
     tk.Label(panel, text="fuck you Cockito", bg=C_PANEL, fg=C_GOLD_DIM,
              font=("Segoe UI", 9, "italic")).pack(pady=(0, 0))
@@ -506,6 +635,27 @@ def main():
     ms_entry.bind("<FocusOut>", apply_ms)
     ms_entry.bind("<Return>", lambda e: (apply_ms(), panel.focus_set()))
 
+    lrow = tk.Frame(panel, bg=C_PANEL)
+    lrow.pack(pady=(4, 0))
+    tk.Label(lrow, text="range", bg=C_PANEL, fg=C_GOLD_DIM,
+             font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
+    lz_var = tk.StringVar(value=str(load_leash()))
+    lz_entry = tk.Entry(lrow, textvariable=lz_var, justify="center", bg=C_BG,
+                        fg=C_GOLD, insertbackground=C_GOLD, relief="flat", bd=2,
+                        width=6, font=("Consolas", 10))
+    lz_entry.pack(side="left")
+
+    def apply_lz(*_):
+        try:
+            v = max(15, int(lz_var.get()))
+        except ValueError:
+            return
+        state["leash"] = v
+        save_leash(v)
+        lz_var.set(str(v))
+    lz_entry.bind("<FocusOut>", apply_lz)
+    lz_entry.bind("<Return>", lambda e: (apply_lz(), panel.focus_set()))
+
     tk.Frame(panel, bg=C_EDGE, height=1).pack(fill="x", padx=18, pady=(6, 6))
     st = tk.Label(panel, text="● STOPPED", bg=C_PANEL, fg=C_STOP,
                   font=("Segoe UI Semibold", 13))
@@ -529,17 +679,26 @@ def main():
         state["winrect"] = (root.winfo_rootx(), root.winfo_rooty(),
                             root.winfo_width(), root.winfo_height())
         on = state["running"]
-        st.config(text="● RUNNING" if on else "● STOPPED",
-                  fg=C_RUN if on else C_STOP)
+        if state.get("returning"):
+            st.config(text="↩ GOING BACK", fg=C_GOLD)
+        else:
+            st.config(text="● RUNNING" if on else "● STOPPED",
+                      fg=C_RUN if on else C_STOP)
         btn.config(text="STOP  (F8)" if on else "START  (F8)",
                    bg=C_STOP if on else C_EDGE,
                    fg="#f0e6c8" if on else "#2c1d0c")
         xy = state.get("xy", ("--", "--"))
         xy_lbl.config(text=f"X: {xy[0]}   Y: {xy[1]}")
+        cur, hm = _xy_num(), state.get("home")
+        if cur and hm:
+            hd = int(((cur[0] - hm[0]) ** 2 + (cur[1] - hm[1]) ** 2) ** 0.5)
+            home_txt = f"{hd} / {state['leash']}"
+        else:
+            home_txt = "--"
         tg = state["target"]
         info.config(text=f"target : {'locked' if tg else 'none'}"
                          f"{'  [GIANT]' if state.get('giant') else ''}\n"
-                         f"mobs seen : {state['blobs']}\n"
+                         f"home dist : {home_txt}\n"
                          f"selects : {state['selects']}\n"
                          f"attacks : {state['attacks']}")
         root.after(200, refresh)
