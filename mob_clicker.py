@@ -39,7 +39,7 @@ KEY_DELAY = 0.04           # délai entre touches de sort (comme ton AHK)
 SPELL_KEYS = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x38]
 WHITE_MIN = 200
 GRAY_TOL = 32              # écart max entre R/G/B : un nom de mob est BLANC (peu saturé)
-NAME_CLICK_DROP = 38       # clic X px sous le nom (sur le corps du mob)
+NAME_CLICK_DROP = 45       # clic X px sous le nom (sur le corps du mob)
 MARGIN_TOP = 140
 # fenêtre de chat (coin bas-gauche)
 CHAT_W = 440
