@@ -39,10 +39,11 @@ LEASH_RANGE = 70           # rayon (unites X/Y) ; au-dela -> retour. Editable da
 LEASH_FILE = os.path.join(BASE_DIR, "leash.txt")
 LEASH_INNER = 15           # "rentre" quand a moins de ca de la maison
 CAST_SETTLE = 0.7          # attente pour finir le sort en cours avant de bouger
-MOVE_SETTLE = 0.85         # attente apres un clic de deplacement (le perso marche)
-CAL_STEP = 160             # px des 2 clics de calibration
-MOVE_MIN, MOVE_MAX = 110, 200   # rayon px d'un clic de deplacement
-RETURN_STEPS = 16          # nb max de clics pour rentrer
+MOVE_SETTLE = 1.2          # attente apres un clic (le perso marche jusqu'au point)
+RETURN_FRAC = 0.9          # clic loin = 90% du chemin vers le bord (gros pas monde)
+RETURN_FRAC_NEAR = 0.45    # clic moins loin quand on approche (pas de depassement)
+RETURN_STEPS = 10          # nb max de clics pour rentrer
+VK_HIDE = 0x56             # touche 'v' maintenue pendant le retour (cache les mobs)
 KEY_DELAY = 0.04           # délai entre touches de sort (comme ton AHK)
 # touches de sorts = AZERTY & é " ' ( - _  (slots 1,2,3,4,5,6,8)
 SPELL_KEYS = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x38]
@@ -112,7 +113,7 @@ C_STOP = "#c0552c"         # rouge brique (arrêté)
 state = {"running": False, "target": None, "attacks": 0, "selects": 0,
          "blobs": 0, "winrect": None, "giant": False, "gold": 0,
          "period": SELECT_PERIOD, "xy": ("--", "--"),
-         "leash": LEASH_RANGE, "home": None, "returning": False, "cal": None}
+         "leash": LEASH_RANGE, "home": None, "returning": False, "ret_dir": 0}
 _stop = False
 
 
@@ -467,74 +468,61 @@ def _cur_xy(sct, mon, w, h):
     return None
 
 
-def _moveclick(mon, w, h, sx, sy):
-    """Clic au sol a (centre + offset ecran)."""
-    click(mon["left"] + w // 2 + int(sx), mon["top"] + h // 2 + int(sy))
+# 8 directions ecran (normalisees), pour tester ou cliquer
+_D = 0.7071
+DIRS8 = [(0, -1), (_D, -_D), (1, 0), (_D, _D),
+         (0, 1), (-_D, _D), (-1, 0), (-_D, -_D)]
 
 
-def _calibrate(sct, mon, w, h):
-    """2 clics-test (haut puis droite) -> matrice inverse ecran<-monde dans state['cal']."""
-    p0 = _cur_xy(sct, mon, w, h)
-    if not p0:
-        return False
-    _moveclick(mon, w, h, 0, -CAL_STEP); time.sleep(MOVE_SETTLE)
-    p1 = _cur_xy(sct, mon, w, h)
-    if not p1:
-        return False
-    vup = (p1[0] - p0[0], p1[1] - p0[1])
-    _moveclick(mon, w, h, CAL_STEP, 0); time.sleep(MOVE_SETTLE)
-    p2 = _cur_xy(sct, mon, w, h)
-    if not p2:
-        return False
-    vr = (p2[0] - p1[0], p2[1] - p1[1])
-    # A (offset ecran -> delta monde) : colonne sx = vr/STEP, colonne sy = -vup/STEP
-    a, c = vr[0] / CAL_STEP, vr[1] / CAL_STEP
-    b, d = -vup[0] / CAL_STEP, -vup[1] / CAL_STEP
-    det = a * d - b * c
-    if abs(det) < 1e-6:                          # mouvement nul/degenere
-        return False
-    state["cal"] = (d / det, -b / det, -c / det, a / det)   # A^-1
-    return True
+def _click_toward(mon, w, h, dx, dy, frac):
+    """Clic au sol dans la direction (dx,dy), a `frac` du chemin jusqu'au bord ecran
+    (frac proche de 1 = clic loin = gros pas pour le perso)."""
+    cx, cy = w // 2, h // 2
+    m, top, big = 30, MARGIN_TOP + 20, 1e9
+    tx = big if dx == 0 else (((w - m) if dx > 0 else m) - cx) / dx
+    ty = big if dy == 0 else (((h - m) if dy > 0 else top) - cy) / dy
+    t = max(0.0, min(tx, ty)) * frac
+    click(mon["left"] + cx + int(dx * t), mon["top"] + cy + int(dy * t))
+
+
+def _home_dist(pos):
+    hx, hy = state["home"]
+    return ((pos[0] - hx) ** 2 + (pos[1] - hy) ** 2) ** 0.5
 
 
 def return_home(sct, mon, w, h):
-    """Ramene le perso a moins de LEASH_INNER de la maison (clics au sol + feedback)."""
+    """Hill-climbing : clique loin dans une direction ; si ca rapproche on garde la
+    direction, sinon on tourne. 'v' maintenu pour cacher les mobs (pas de clic-mob)."""
     state["returning"] = True
+    vdown = False
     try:
-        time.sleep(CAST_SETTLE)                  # laisse finir le sort en cours
-        if state["cal"] is None and not _calibrate(sct, mon, w, h):
-            return
-        prev, stalls = None, 0
+        time.sleep(CAST_SETTLE)                       # laisse finir le sort en cours
+        user32.keybd_event(VK_HIDE, 0, 0, 0)          # maintient 'v' -> cache les mobs
+        vdown = True
+        idx = state.get("ret_dir", 0)
         for _ in range(RETURN_STEPS):
-            if _stop or not state["running"]:
+            if _stop or not state["running"] or not state["home"]:
                 return
             pos = _cur_xy(sct, mon, w, h)
-            if not pos or not state["home"]:
+            if not pos:
                 return
-            hx, hy = state["home"]
-            d = ((pos[0] - hx) ** 2 + (pos[1] - hy) ** 2) ** 0.5
+            d = _home_dist(pos)
             if d <= LEASH_INNER:
-                return                           # rentre
-            if prev is not None and d >= prev - 1:   # pas plus pres -> bloque/mauvais sens
-                stalls += 1
-                if stalls >= 2:
-                    state["cal"] = None
-                    if not _calibrate(sct, mon, w, h):
-                        return
-                    stalls, prev = 0, None
-                    continue
-            else:
-                stalls = 0
-            prev = d
-            ai = state["cal"]
-            wx, wy = hx - pos[0], hy - pos[1]
-            sx = ai[0] * wx + ai[1] * wy
-            sy = ai[2] * wx + ai[3] * wy
-            mag = (sx * sx + sy * sy) ** 0.5 or 1.0
-            k = max(MOVE_MIN, min(MOVE_MAX, mag)) / mag
-            _moveclick(mon, w, h, sx * k, sy * k)
+                return                                # rentre
+            frac = RETURN_FRAC if d > 35 else RETURN_FRAC_NEAR
+            dx, dy = DIRS8[idx % 8]
+            _click_toward(mon, w, h, dx, dy, frac)
             time.sleep(MOVE_SETTLE)
+            npos = _cur_xy(sct, mon, w, h)
+            if not npos:
+                return
+            if _home_dist(npos) < d - 2:              # ca rapproche -> on garde la direction
+                state["ret_dir"] = idx % 8
+            else:                                     # ca n'aide pas -> on tourne
+                idx += 1
     finally:
+        if vdown:
+            user32.keybd_event(VK_HIDE, 0, 2, 0)      # relache 'v'
         state["returning"] = False
 
 
