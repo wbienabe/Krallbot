@@ -68,6 +68,23 @@ GREEN_DY0, GREEN_DY1 = -26, 95
 SELF_DX, SELF_DY = 0, 0
 SELF_HALFW = 120
 SELF_UP, SELF_DOWN = 130, 130
+# --- lecture des coords X/Y (texte blanc en haut a droite). Recherche DYNAMIQUE :
+# on trouve la ligne de chiffres dans le coin, et la taille est normalisee avant
+# comparaison -> marche a n'importe quelle resolution.
+COORD_W = 300       # largeur de recherche depuis le bord droit
+COORD_H = 56        # hauteur de recherche (au-dessus de la minimap)
+DIGIT_TPL = {
+    "0": ".###.#...##...##...##...##...##...##...#.###.",
+    "1": "...##..#####.##...##...##...##...##...##...##",
+    "2": ".###.#...#....#....#...#....#...#...#...#####",
+    "3": ".###.#...#....#....#..##.....#....##...#.###.",
+    "4": "...#...##...##..#.#..#.#.#..#.#####...#....#.",
+    "5": ".####.#...#....####.#...#....#....##...#.###.",
+    "6": ".###.#...##....#.##.##..##...##...##...#.###.",
+    "7": "#####...#....#...#....#....#...#....#....#...",
+    "8": ".###.#...##...##...#.###.#...##...##...#.###.",
+    "9": ".###.#...##...##...##..##.##.#....##...#.###.",
+}
 MIN_BLOB = 16
 EXCLUDE_RADIUS = 90        # ne pas re-cibler un mob à moins de X px d'une cible récente
 RECENT_KEEP = 3            # nb de dernières cibles à éviter
@@ -85,7 +102,7 @@ C_STOP = "#c0552c"         # rouge brique (arrêté)
 
 state = {"running": False, "target": None, "attacks": 0, "selects": 0,
          "blobs": 0, "winrect": None, "giant": False, "gold": 0,
-         "period": SELECT_PERIOD}
+         "period": SELECT_PERIOD, "xy": ("--", "--")}
 _stop = False
 
 
@@ -245,6 +262,83 @@ def is_giant(img, w, h):
     return _giant_gold(img, w, h) >= GIANT_GOLD_MIN
 
 
+CHAR_ARR = {c: np.array([1 if p == "#" else 0 for p in s]) for c, s in DIGIT_TPL.items()}
+
+
+def _resize(g, H=9, W=5):
+    h, w = g.shape
+    return g[(np.arange(H) * h // H)][:, (np.arange(W) * w // W)]
+
+
+def _match_char(g):
+    a = _resize(g).astype(int).flatten()
+    best, bs = None, -1
+    for c, t in CHAR_ARR.items():
+        s = int((a == t).sum())
+        if s > bs:
+            bs, best = s, c
+    return best if bs >= 36 else None            # rejette ":" et le bruit
+
+
+def _read_band(band):
+    """Decoupe une bande horizontale en glyphes -> [(centre_x, caractere)]."""
+    cols = band.any(axis=0)
+    out = []
+    i, n = 0, len(cols)
+    while i < n:
+        if cols[i]:
+            j = i
+            while j < n and cols[j]:
+                j += 1
+            sub = band[:, i:j]
+            rows = sub.any(axis=1)
+            if rows.sum() >= 3 and (j - i) >= 2:
+                ys = np.where(rows)[0]
+                c = _match_char(sub[ys.min():ys.max() + 1, :])
+                if c:
+                    out.append(((i + j) // 2, c))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def read_xy(img, w, h):
+    """Lit X/Y dynamiquement : la ligne des coords est la seule a donner plein de
+    chiffres propres. On la trouve, puis on separe X/Y au plus grand espace.
+    Taille normalisee -> marche a n'importe quelle resolution."""
+    reg = img[0:COORD_H, max(0, w - COORD_W):w]
+    r, g, b = reg[:, :, 0], reg[:, :, 1], reg[:, :, 2]
+    white = (r > 165) & (g > 165) & (b > 150)
+    best = []
+    for cy in range(7, COORD_H - 6, 2):
+        d = _read_band(white[cy - 7:cy + 8, :])
+        if len(d) > len(best):
+            best = d
+    if len(best) < 4:                            # ligne des coords = au moins 4 chiffres
+        return "", ""
+    split = max(range(len(best) - 1), key=lambda k: best[k + 1][0] - best[k][0])
+    xs = "".join(c for _, c in best[:split + 1])
+    ys = "".join(c for _, c in best[split + 1:])
+    return xs, ys
+
+
+def coords_loop():
+    """Lit le X/Y (en haut a droite) toutes les ~0.6 s et le met dans la GUI."""
+    sct = mss.MSS()
+    mon = sct.monitors[1]
+    w, h = mon["width"], mon["height"]
+    while not _stop:
+        try:
+            frame = np.array(sct.grab(mon))[:, :, :3][:, :, ::-1]
+            xs, ys = read_xy(frame, w, h)
+            if xs and ys:
+                state["xy"] = (xs, ys)
+        except Exception:
+            pass
+        time.sleep(0.6)
+
+
 def save_debug(img, w, h, exclude_rects=()):
     from PIL import Image, ImageDraw
     names = _names(img, w, h, exclude_rects)
@@ -375,7 +469,7 @@ def main():
     root.title("KrallBot")
     root.configure(bg=C_EDGE)
     root.attributes("-topmost", True)
-    root.geometry("280x272+20+20")
+    root.geometry("280x300+20+20")
     state["period"] = load_period() / 1000.0
 
     # cadre or -> panneau bois (bordure dorée façon fenêtre SRO)
@@ -386,7 +480,10 @@ def main():
     tk.Label(panel, text="✦ KrallBot ✦ (AMK)", bg=C_PANEL, fg=C_GOLD,
              font=("Trajan Pro", 13, "bold")).pack(pady=(10, 0))
     tk.Label(panel, text="fuck you Cockito", bg=C_PANEL, fg=C_GOLD_DIM,
-             font=("Segoe UI", 9, "italic")).pack(pady=(0, 2))
+             font=("Segoe UI", 9, "italic")).pack(pady=(0, 0))
+    xy_lbl = tk.Label(panel, text="X: --   Y: --", bg=C_PANEL, fg=C_PARCH,
+                      font=("Consolas", 10))
+    xy_lbl.pack(pady=(0, 2))
 
     prow = tk.Frame(panel, bg=C_PANEL)
     prow.pack(pady=(4, 0))
@@ -423,6 +520,7 @@ def main():
 
     threading.Thread(target=hotkey_loop, daemon=True).start()
     threading.Thread(target=action_loop, daemon=True).start()
+    threading.Thread(target=coords_loop, daemon=True).start()
 
     def refresh():
         if _stop:
@@ -436,6 +534,8 @@ def main():
         btn.config(text="STOP  (F8)" if on else "START  (F8)",
                    bg=C_STOP if on else C_EDGE,
                    fg="#f0e6c8" if on else "#2c1d0c")
+        xy = state.get("xy", ("--", "--"))
+        xy_lbl.config(text=f"X: {xy[0]}   Y: {xy[1]}")
         tg = state["target"]
         info.config(text=f"target : {'locked' if tg else 'none'}"
                          f"{'  [GIANT]' if state.get('giant') else ''}\n"
