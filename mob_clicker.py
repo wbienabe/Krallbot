@@ -383,8 +383,8 @@ def main():
                      highlightthickness=2)
     panel.pack(fill="both", expand=True, padx=3, pady=3)
 
-    tk.Label(panel, text="✦ KrallBot ✦", bg=C_PANEL, fg=C_GOLD,
-             font=("Trajan Pro", 15, "bold")).pack(pady=(10, 0))
+    tk.Label(panel, text="✦ KrallBot ✦ (AMK)", bg=C_PANEL, fg=C_GOLD,
+             font=("Trajan Pro", 13, "bold")).pack(pady=(10, 0))
     tk.Label(panel, text="fuck you Cockito", bg=C_PANEL, fg=C_GOLD_DIM,
              font=("Segoe UI", 9, "italic")).pack(pady=(0, 2))
 
