@@ -375,7 +375,7 @@ def main():
     root.title("KrallBot")
     root.configure(bg=C_EDGE)
     root.attributes("-topmost", True)
-    root.geometry("280x250+20+20")
+    root.geometry("280x272+20+20")
     state["period"] = load_period() / 1000.0
 
     # cadre or -> panneau bois (bordure dorée façon fenêtre SRO)
@@ -384,7 +384,9 @@ def main():
     panel.pack(fill="both", expand=True, padx=3, pady=3)
 
     tk.Label(panel, text="✦ KrallBot ✦", bg=C_PANEL, fg=C_GOLD,
-             font=("Trajan Pro", 15, "bold")).pack(pady=(10, 2))
+             font=("Trajan Pro", 15, "bold")).pack(pady=(10, 0))
+    tk.Label(panel, text="fuck you Cockito", bg=C_PANEL, fg=C_GOLD_DIM,
+             font=("Segoe UI", 9, "italic")).pack(pady=(0, 2))
 
     prow = tk.Frame(panel, bg=C_PANEL)
     prow.pack(pady=(4, 0))
