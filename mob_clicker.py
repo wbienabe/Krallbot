@@ -305,15 +305,26 @@ def _read_band(band):
                 j += 1
             sub = band[:, i:j]
             rows = sub.any(axis=1)
+            ys = np.where(rows)[0]
             if rows.sum() >= 3 and (j - i) >= 2:
-                ys = np.where(rows)[0]
                 c = _match_char(sub[ys.min():ys.max() + 1, :])
                 if c:
                     out.append(((i + j) // 2, c))
+            elif (3 <= (j - i) <= 10 and 1 <= rows.sum() <= 3
+                  and ys.min() >= band.shape[0] // 2 - 4
+                  and ys.max() <= band.shape[0] // 2 + 3):
+                out.append(((i + j) // 2, "-"))     # barre fine centree = signe moins
             i = j
         else:
             i += 1
     return out
+
+
+def _clean_coord(s):
+    """Garde un eventuel '-' en tete (coord negative), jette le reste du bruit."""
+    neg = s.startswith("-")
+    digits = "".join(c for c in s if c.isdigit())
+    return ("-" + digits) if (neg and digits) else digits
 
 
 def read_xy(img, w, h):
@@ -333,7 +344,7 @@ def read_xy(img, w, h):
     split = max(range(len(best) - 1), key=lambda k: best[k + 1][0] - best[k][0])
     xs = "".join(c for _, c in best[:split + 1])
     ys = "".join(c for _, c in best[split + 1:])
-    return xs, ys
+    return _clean_coord(xs), _clean_coord(ys)
 
 
 def coords_loop():
@@ -466,12 +477,17 @@ def hotkey_loop():
         time.sleep(0.015)
 
 
+def _signed(s):
+    """'929' ou '-929' -> int ; sinon None."""
+    body = s[1:] if s.startswith("-") else s
+    return int(s) if body.isdigit() else None
+
+
 def _xy_num():
     """Coords courantes (depuis la GUI) en nombres, ou None."""
     xs, ys = state.get("xy", ("--", "--"))
-    if xs.isdigit() and ys.isdigit():
-        return int(xs), int(ys)
-    return None
+    nx, ny = _signed(xs), _signed(ys)
+    return (nx, ny) if (nx is not None and ny is not None) else None
 
 
 def _cur_xy(sct, mon, w, h):
@@ -479,8 +495,9 @@ def _cur_xy(sct, mon, w, h):
     try:
         f = np.array(sct.grab(mon))[:, :, :3][:, :, ::-1]
         xs, ys = read_xy(f, w, h)
-        if xs.isdigit() and ys.isdigit():
-            return int(xs), int(ys)
+        nx, ny = _signed(xs), _signed(ys)
+        if nx is not None and ny is not None:
+            return nx, ny
     except Exception:
         pass
     return None
@@ -646,32 +663,32 @@ def main():
     lrow.pack(pady=(4, 0))
     tk.Label(lrow, text="range", bg=C_PANEL, fg=C_GOLD_DIM,
              font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
-    lz_var = tk.StringVar(value=str(load_leash()))
-    lz_entry = tk.Entry(lrow, textvariable=lz_var, justify="center", bg=C_BG,
-                        fg=C_GOLD, insertbackground=C_GOLD, relief="flat", bd=2,
-                        width=6, font=("Consolas", 10))
-    lz_entry.pack(side="left")
+    lz_var = tk.IntVar(value=load_leash())
 
-    def apply_lz(*_):
-        try:
-            v = max(15, int(lz_var.get()))
-        except ValueError:
-            return
-        state["leash"] = v
-        save_leash(v)
-        lz_var.set(str(v))
-    lz_entry.bind("<FocusOut>", apply_lz)
-    lz_entry.bind("<Return>", lambda e: (apply_lz(), panel.focus_set()))
+    def apply_lz(v):
+        state["leash"] = int(float(v))
 
+    def save_lz(*_):
+        save_leash(state["leash"])
+    lz_scale = tk.Scale(lrow, from_=15, to=100, orient="horizontal",
+                        variable=lz_var, command=apply_lz, length=180,
+                        bg=C_PANEL, fg=C_GOLD, troughcolor=C_BG,
+                        activebackground=C_GOLD, highlightthickness=0,
+                        bd=0, sliderrelief="flat", font=("Consolas", 8))
+    lz_scale.pack(side="left")
+    lz_scale.bind("<ButtonRelease-1>", save_lz)
+
+    gbrow = tk.Frame(panel, bg=C_PANEL)
+    gbrow.pack(pady=(0, 0))
     gb_var = tk.BooleanVar(value=state["leash_on"])
 
     def apply_gb():
         state["leash_on"] = gb_var.get()
         save_return_on(gb_var.get())
-    tk.Checkbutton(lrow, text="go back", variable=gb_var, command=apply_gb,
+    tk.Checkbutton(gbrow, text="go back", variable=gb_var, command=apply_gb,
                    bg=C_PANEL, fg=C_PARCH, selectcolor=C_BG, activebackground=C_PANEL,
                    activeforeground=C_PARCH, font=("Segoe UI", 9),
-                   bd=0, highlightthickness=0).pack(side="left", padx=(10, 0))
+                   bd=0, highlightthickness=0).pack()
 
     tk.Frame(panel, bg=C_EDGE, height=1).pack(fill="x", padx=18, pady=(6, 6))
     st = tk.Label(panel, text="● STOPPED", bg=C_PANEL, fg=C_STOP,
@@ -699,7 +716,7 @@ def main():
         if state.get("returning"):
             st.config(text="↩ GOING BACK", fg=C_GOLD)
         else:
-            st.config(text="● RUNNING" if on else "● STOPPED",
+            st.config(text="● Fakiring" if on else "● STOPPED",
                       fg=C_RUN if on else C_STOP)
         btn.config(text="STOP  (F8)" if on else "START  (F8)",
                    bg=C_STOP if on else C_EDGE,
@@ -709,15 +726,12 @@ def main():
         cur, hm = _xy_num(), state.get("home")
         if cur and hm:
             hd = int(((cur[0] - hm[0]) ** 2 + (cur[1] - hm[1]) ** 2) ** 0.5)
-            home_txt = f"{hd} / {state['leash']}"
+            far = hd >= state["leash"]
+            dist_txt = f"{hd} m" + ("  ⚠" if far else "")
         else:
-            home_txt = "--"
-        tg = state["target"]
-        info.config(text=f"target : {'locked' if tg else 'none'}"
-                         f"{'  [GIANT]' if state.get('giant') else ''}\n"
-                         f"home dist : {home_txt}\n"
-                         f"selects : {state['selects']}\n"
-                         f"attacks : {state['attacks']}")
+            dist_txt = "--"
+        info.config(text=f"distance from center : {dist_txt}"
+                         f"{'  [GIANT]' if state.get('giant') else ''}")
         root.after(200, refresh)
 
     def on_close():
