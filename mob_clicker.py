@@ -90,6 +90,8 @@ COORD_H = 56        # hauteur de recherche (au-dessus de la minimap)
 COORD_DIGITS_MAX = 5  # une coord a au plus ~5 chiffres ; au-dela = fusion de 2 lignes (misread)
 COORD_MAX = 30000   # |coord| plausible ; au-dela = misread OCR -> rejeté
 COORD_STEP = 600    # saut max plausible entre 2 lectures (~0.6 s) ; au-dela = misread/téléport
+COORD_ANCHOR_MIN = 3  # un saut n'est cru qu'apres 3 lectures cohérentes d'affilée (anti-misread)
+LEASH_CONFIRM_SEC = 1.5  # il faut rester hors-range au moins ça avant de rentrer (anti-spike)
 DIGIT_TPL = {
     "0": ".###.#...##...##...##...##...##...##...#.###.",
     "1": "...##..#####.##...##...##...##...##...##...##",
@@ -358,13 +360,14 @@ def read_xy(img, w, h):
 
 def coords_loop():
     """Lit le X/Y (en haut a droite) toutes les ~0.6 s, avec garde-fou anti-misread :
-    une lecture incohérente (hors borne, ou saut énorme depuis la dernière position)
-    est ignorée tant qu'une 2e lecture ne la confirme pas (vrai mouvement/téléport)."""
+    un petit déplacement (proche de la dernière position) est suivi tout de suite ;
+    un saut énorme n'est cru qu'après COORD_ANCHOR_MIN lectures cohérentes d'affilée
+    (vrai téléport / 1er ancrage) -> une valeur OCR aberrante isolée est ignorée."""
     sct = mss.MSS()
     mon = sct.monitors[1]
     w, h = mon["width"], mon["height"]
     last = None                                   # dernière position de confiance (nombres)
-    cand = None                                   # lecture en attente de confirmation
+    run = []                                      # série de lectures cohérentes en attente d'ancrage
 
     def _near(a, b):
         return abs(a[0] - b[0]) <= COORD_STEP and abs(a[1] - b[1]) <= COORD_STEP
@@ -376,11 +379,14 @@ def coords_loop():
             nx, ny = _signed(xs), _signed(ys)
             if nx is not None and ny is not None and abs(nx) <= COORD_MAX and abs(ny) <= COORD_MAX:
                 p = (nx, ny)
-                if (last is not None and _near(p, last)) or (cand is not None and _near(p, cand)):
-                    last, cand = p, None          # mouvement normal, ou saut confirmé 2x
+                if last is not None and _near(p, last):
+                    last, run = p, []             # déplacement plausible -> on suit direct
                     state["xy"] = (xs, ys)
-                else:
-                    cand = p                      # 1re lecture / saut suspect -> à confirmer
+                else:                             # saut suspect / pas encore d'ancre
+                    run = run + [p] if (run and _near(p, run[-1])) else [p]
+                    if len(run) >= COORD_ANCHOR_MIN:   # confirmé N fois -> vrai (téléport/ancre)
+                        last, run = p, []
+                        state["xy"] = (xs, ys)
         except Exception:
             pass
         time.sleep(0.6)
@@ -592,11 +598,13 @@ def action_loop():
     last_select = 0.0
     giant_since = 0.0                             # depuis quand on est verrouillé sur un giant
     giant_seen = 0.0                              # dernière fois que l'icône de rang a été vue
+    far_since = 0.0                               # depuis quand on est hors-range (0 = dedans)
     recent = []                                   # dernières positions cliquées
     while not _stop:
         if not state["running"]:
             state["home"] = None                  # re-ancre la maison au prochain Start
             state["giant"] = False                # libère le verrou giant
+            far_since = 0.0
             time.sleep(0.04)
             continue
         try:
@@ -607,9 +615,16 @@ def action_loop():
                     state["home"] = cur
                 elif state["leash_on"]:
                     hx, hy = state["home"]
-                    if (cur[0] - hx) ** 2 + (cur[1] - hy) ** 2 > state["leash"] ** 2:
-                        return_home(sct, mon, w, h)   # stoppe le spam et rentre
-                        continue
+                    far = (cur[0] - hx) ** 2 + (cur[1] - hy) ** 2 > state["leash"] ** 2
+                    if not far:
+                        far_since = 0.0
+                    else:
+                        if far_since == 0.0:
+                            far_since = time.time()
+                        if time.time() - far_since >= LEASH_CONFIRM_SEC:   # hors-range confirmé
+                            far_since = 0.0
+                            return_home(sct, mon, w, h)   # stoppe le spam et rentre
+                            continue
             for vk in SPELL_KEYS:                 # spam des sorts
                 if not state["running"]:
                     break
