@@ -48,7 +48,7 @@ VK_HIDE = 0x56             # touche 'v' maintenue pendant le retour (cache les m
 KEY_DELAY = 0.04           # délai entre touches de sort (comme ton AHK)
 # touches de sorts = AZERTY & é " ' ( - _  (slots 1,2,3,4,5,6,8)
 SPELL_KEYS = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x38]
-WHITE_MIN = 200
+WHITE_MIN = 220           # nom de mob = blanc PUR (coeur 255) ; neige/glace/quête plafonnent ~207-214
 GRAY_TOL = 32              # écart max entre R/G/B : un nom de mob est BLANC (peu saturé)
 NAME_CLICK_DROP = 45       # clic X px sous le nom (sur le corps du mob)
 MARGIN_TOP = 140
@@ -62,6 +62,9 @@ GIANT_Y1 = 92
 GIANT_X0 = -66            # fenêtre de l'icône, par rapport au centre de l'écran
 GIANT_X1 = -8
 GIANT_GOLD_MIN = 15        # Giant ~28, général ~3, champion ~0 -> seuil 15
+GIANT_LOCK_MAX = 60.0      # sécurité : jamais verrouillé sur un giant plus de 60 s
+GIANT_LOSE_GRACE = 1.5     # garde le verrou si l'icône a été vue il y a moins de ça (anti-flicker)
+GIANT_CONFIRM_TRIES = 6    # relectures du rang après un clic (la fenêtre de cible peut tarder)
 MARGIN_BOTTOM = 150
 MARGIN_LEFT = 10
 MARGIN_RIGHT = 230
@@ -84,6 +87,9 @@ SELF_UP, SELF_DOWN = 130, 130
 # comparaison -> marche a n'importe quelle resolution.
 COORD_W = 300       # largeur de recherche depuis le bord droit
 COORD_H = 56        # hauteur de recherche (au-dessus de la minimap)
+COORD_DIGITS_MAX = 5  # une coord a au plus ~5 chiffres ; au-dela = fusion de 2 lignes (misread)
+COORD_MAX = 30000   # |coord| plausible ; au-dela = misread OCR -> rejeté
+COORD_STEP = 600    # saut max plausible entre 2 lectures (~0.6 s) ; au-dela = misread/téléport
 DIGIT_TPL = {
     "0": ".###.#...##...##...##...##...##...##...#.###.",
     "1": "...##..#####.##...##...##...##...##...##...##",
@@ -321,10 +327,13 @@ def _read_band(band):
 
 
 def _clean_coord(s):
-    """Garde un eventuel '-' en tete (coord negative), jette le reste du bruit."""
+    """Garde un eventuel '-' en tete (coord negative), jette le reste du bruit.
+    Rejette aussi un groupe trop long = fusion de deux lignes (misread)."""
     neg = s.startswith("-")
     digits = "".join(c for c in s if c.isdigit())
-    return ("-" + digits) if (neg and digits) else digits
+    if not digits or len(digits) > COORD_DIGITS_MAX:
+        return ""
+    return ("-" + digits) if neg else digits
 
 
 def read_xy(img, w, h):
@@ -348,16 +357,30 @@ def read_xy(img, w, h):
 
 
 def coords_loop():
-    """Lit le X/Y (en haut a droite) toutes les ~0.6 s et le met dans la GUI."""
+    """Lit le X/Y (en haut a droite) toutes les ~0.6 s, avec garde-fou anti-misread :
+    une lecture incohérente (hors borne, ou saut énorme depuis la dernière position)
+    est ignorée tant qu'une 2e lecture ne la confirme pas (vrai mouvement/téléport)."""
     sct = mss.MSS()
     mon = sct.monitors[1]
     w, h = mon["width"], mon["height"]
+    last = None                                   # dernière position de confiance (nombres)
+    cand = None                                   # lecture en attente de confirmation
+
+    def _near(a, b):
+        return abs(a[0] - b[0]) <= COORD_STEP and abs(a[1] - b[1]) <= COORD_STEP
+
     while not _stop:
         try:
             frame = np.array(sct.grab(mon))[:, :, :3][:, :, ::-1]
             xs, ys = read_xy(frame, w, h)
-            if xs and ys:
-                state["xy"] = (xs, ys)
+            nx, ny = _signed(xs), _signed(ys)
+            if nx is not None and ny is not None and abs(nx) <= COORD_MAX and abs(ny) <= COORD_MAX:
+                p = (nx, ny)
+                if (last is not None and _near(p, last)) or (cand is not None and _near(p, cand)):
+                    last, cand = p, None          # mouvement normal, ou saut confirmé 2x
+                    state["xy"] = (xs, ys)
+                else:
+                    cand = p                      # 1re lecture / saut suspect -> à confirmer
         except Exception:
             pass
         time.sleep(0.6)
@@ -567,10 +590,13 @@ def action_loop():
     mon = sct.monitors[1]
     w, h = mon["width"], mon["height"]
     last_select = 0.0
+    giant_since = 0.0                             # depuis quand on est verrouillé sur un giant
+    giant_seen = 0.0                              # dernière fois que l'icône de rang a été vue
     recent = []                                   # dernières positions cliquées
     while not _stop:
         if not state["running"]:
             state["home"] = None                  # re-ancre la maison au prochain Start
+            state["giant"] = False                # libère le verrou giant
             time.sleep(0.04)
             continue
         try:
@@ -593,6 +619,14 @@ def action_loop():
             if state["running"] and time.time() - last_select >= state["period"]:
                 last_select = time.time()
                 frame = np.array(sct.grab(mon))[:, :, :3][:, :, ::-1]
+                # giant encore ta cible (icône de rang dorée présente = vivant) -> on garde
+                if state.get("giant"):
+                    if _giant_gold(frame, w, h) >= GIANT_GOLD_MIN:
+                        giant_seen = time.time()
+                    if (time.time() - giant_seen < GIANT_LOSE_GRACE
+                            and time.time() - giant_since < GIANT_LOCK_MAX):
+                        continue
+                    state["giant"] = False              # giant mort/perdu -> on repart
                 tgt, n = detect(frame, w, h, avoid=recent, exclude_rects=_win_exclude(mon))
                 state["target"], state["blobs"] = tgt, n
                 if tgt:
@@ -600,15 +634,17 @@ def action_loop():
                     state["selects"] += 1
                     recent.append(tgt)
                     recent[:] = recent[-RECENT_KEEP:]   # garde les 2 dernières
-                    time.sleep(0.15)                    # laisse la fenêtre de cible s'actualiser
-                    chk = np.array(sct.grab(mon))[:, :, :3][:, :, ::-1]
-                    gc = _giant_gold(chk, w, h)
+                    gc = 0                              # scrute le rang : la fenêtre de cible tarde parfois
+                    for _ in range(GIANT_CONFIRM_TRIES):
+                        time.sleep(0.1)
+                        gc = _giant_gold(np.array(sct.grab(mon))[:, :, :3][:, :, ::-1], w, h)
+                        if gc >= GIANT_GOLD_MIN:
+                            break
                     state["gold"] = gc
                     if gc >= GIANT_GOLD_MIN:
                         press_key(BERSERK_KEY)          # berserk (Tab) sur les Giant
                         state["giant"] = True
-                    else:
-                        state["giant"] = False
+                        giant_since = giant_seen = time.time()   # démarre le verrou sur ce giant
         except Exception:
             import traceback
             open(os.path.join(BASE_DIR, "mob_clicker_error.txt"), "w", encoding="utf-8").write(traceback.format_exc())
