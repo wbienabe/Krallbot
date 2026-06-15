@@ -37,6 +37,7 @@ PERIOD_FILE = os.path.join(BASE_DIR, "period_ms.txt")
 # --- laisse / retour a la maison (rester dans un rayon autour du point de depart) ---
 LEASH_RANGE = 70           # rayon (unites X/Y) ; au-dela -> retour. Editable dans le bot
 LEASH_FILE = os.path.join(BASE_DIR, "leash.txt")
+RETURN_ON_FILE = os.path.join(BASE_DIR, "return_on.txt")   # retour maison activé ?
 LEASH_INNER = 15           # "rentre" quand a moins de ca de la maison
 CAST_SETTLE = 0.7          # attente pour finir le sort en cours avant de bouger
 MOVE_SETTLE = 1.2          # attente apres un clic (le perso marche jusqu'au point)
@@ -113,7 +114,8 @@ C_STOP = "#c0552c"         # rouge brique (arrêté)
 state = {"running": False, "target": None, "attacks": 0, "selects": 0,
          "blobs": 0, "winrect": None, "giant": False, "gold": 0,
          "period": SELECT_PERIOD, "xy": ("--", "--"),
-         "leash": LEASH_RANGE, "home": None, "returning": False, "ret_dir": 0}
+         "leash": LEASH_RANGE, "home": None, "returning": False, "ret_dir": 0,
+         "leash_on": True}
 _stop = False
 
 
@@ -424,6 +426,22 @@ def save_leash(v):
         pass
 
 
+def load_return_on():
+    try:
+        with open(RETURN_ON_FILE, encoding="utf-8") as f:
+            return f.read().strip() != "0"
+    except Exception:
+        return True
+
+
+def save_return_on(on):
+    try:
+        with open(RETURN_ON_FILE, "w", encoding="utf-8") as f:
+            f.write("1" if on else "0")
+    except Exception:
+        pass
+
+
 def hotkey_loop():
     """Fast, dedicated F8/F7/F10 polling so a quick press is never missed."""
     global _stop
@@ -539,12 +557,12 @@ def action_loop():
             time.sleep(0.04)
             continue
         try:
-            # ancre la maison au demarrage, puis surveille la laisse
+            # ancre la maison au demarrage, puis surveille la laisse (si activee)
             cur = _xy_num()
             if cur:
                 if state["home"] is None:
                     state["home"] = cur
-                else:
+                elif state["leash_on"]:
                     hx, hy = state["home"]
                     if (cur[0] - hx) ** 2 + (cur[1] - hy) ** 2 > state["leash"] ** 2:
                         return_home(sct, mon, w, h)   # stoppe le spam et rentre
@@ -588,6 +606,7 @@ def main():
     root.geometry("280x345+20+20")
     state["period"] = load_period() / 1000.0
     state["leash"] = load_leash()
+    state["leash_on"] = load_return_on()
 
     # cadre or -> panneau bois (bordure dorée façon fenêtre SRO)
     panel = tk.Frame(root, bg=C_PANEL, highlightbackground=C_EDGE,
@@ -643,6 +662,16 @@ def main():
         lz_var.set(str(v))
     lz_entry.bind("<FocusOut>", apply_lz)
     lz_entry.bind("<Return>", lambda e: (apply_lz(), panel.focus_set()))
+
+    gb_var = tk.BooleanVar(value=state["leash_on"])
+
+    def apply_gb():
+        state["leash_on"] = gb_var.get()
+        save_return_on(gb_var.get())
+    tk.Checkbutton(lrow, text="go back", variable=gb_var, command=apply_gb,
+                   bg=C_PANEL, fg=C_PARCH, selectcolor=C_BG, activebackground=C_PANEL,
+                   activeforeground=C_PARCH, font=("Segoe UI", 9),
+                   bd=0, highlightthickness=0).pack(side="left", padx=(10, 0))
 
     tk.Frame(panel, bg=C_EDGE, height=1).pack(fill="x", padx=18, pady=(6, 6))
     st = tk.Label(panel, text="● STOPPED", bg=C_PANEL, fg=C_STOP,
