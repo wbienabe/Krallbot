@@ -67,7 +67,7 @@ GIANT_LOSE_GRACE = 1.5     # garde le verrou si l'icône a été vue il y a moin
 GIANT_CONFIRM_TRIES = 6    # relectures du rang après un clic (la fenêtre de cible peut tarder)
 MARGIN_BOTTOM = 150
 MARGIN_LEFT = 10
-MARGIN_RIGHT = 230
+MARGIN_RIGHT = 170
 # zone autour de toi à ignorer (toi + ton pet, au centre). Asymétrique : plus
 # bas, car le nom du pet ("< No name >") s'affiche juste sous le tien.
 PLAYER_UP = 140
@@ -302,12 +302,9 @@ def _match_char(g):
 
 
 def _read_band(band):
-    """Decoupe une bande horizontale en glyphes -> ([(centre_x, caractere)], [centres_rates]).
-    'rates' = blobs de la taille d'un chiffre qu'on n'a PAS su lire. Un chiffre rate au
-    milieu d'un nombre fausse la coord d'un facteur ~10 (ex: -1877 lu -827), donc on le
-    signale pour rejeter la lecture plutot que de laisser le chiffre disparaitre."""
+    """Decoupe une bande horizontale en glyphes -> [(centre_x, caractere)]."""
     cols = band.any(axis=0)
-    out, fail = [], []
+    out = []
     i, n = 0, len(cols)
     while i < n:
         if cols[i]:
@@ -321,8 +318,6 @@ def _read_band(band):
                 c = _match_char(sub[ys.min():ys.max() + 1, :])
                 if c:
                     out.append(((i + j) // 2, c))
-                elif 3 <= (j - i) <= 12 and rows.sum() >= 6:
-                    fail.append((i + j) // 2)        # chiffre probable mais illisible
             elif (3 <= (j - i) <= 10 and 1 <= rows.sum() <= 3
                   and ys.min() >= band.shape[0] // 2 - 4
                   and ys.max() <= band.shape[0] // 2 + 3):
@@ -330,7 +325,7 @@ def _read_band(band):
             i = j
         else:
             i += 1
-    return out, fail
+    return out
 
 
 def _clean_coord(s):
@@ -350,22 +345,16 @@ def read_xy(img, w, h):
     reg = img[0:COORD_H, max(0, w - COORD_W):w]
     r, g, b = reg[:, :, 0], reg[:, :, 1], reg[:, :, 2]
     white = (r > 165) & (g > 165) & (b > 150)
-    best, bfail = [], []
+    best = []
     for cy in range(7, COORD_H - 6, 2):
-        d, f = _read_band(white[cy - 7:cy + 8, :])
+        d = _read_band(white[cy - 7:cy + 8, :])
         if len(d) > len(best):
-            best, bfail = d, f
+            best = d
     if len(best) < 4:                            # ligne des coords = au moins 4 chiffres
         return "", ""
     split = max(range(len(best) - 1), key=lambda k: best[k + 1][0] - best[k][0])
-    xg, yg = best[:split + 1], best[split + 1:]
-    xs = "".join(c for _, c in xg)
-    ys = "".join(c for _, c in yg)
-    # un chiffre illisible A L'INTERIEUR d'un nombre -> chiffre disparu, coord fausse : on rejette
-    if any(xg[0][0] < fc < xg[-1][0] for fc in bfail):
-        xs = ""
-    if any(yg[0][0] < fc < yg[-1][0] for fc in bfail):
-        ys = ""
+    xs = "".join(c for _, c in best[:split + 1])
+    ys = "".join(c for _, c in best[split + 1:])
     return _clean_coord(xs), _clean_coord(ys)
 
 
@@ -627,15 +616,22 @@ def action_loop():
                 elif state["leash_on"]:
                     hx, hy = state["home"]
                     far = (cur[0] - hx) ** 2 + (cur[1] - hy) ** 2 > state["leash"] ** 2
+                    # garde anti "chiffre perdu" : une coord avec MOINS de chiffres que la
+                    # maison (ex: -827 lu au lieu de -1877) = OCR qui a saute un chiffre, pas
+                    # un vrai eloignement -> on ignore, sinon on rentrerait a tort. Un vrai
+                    # deplacement garde le meme nombre de chiffres.
+                    dropped = (len(str(abs(cur[0]))) < len(str(abs(hx)))
+                               or len(str(abs(cur[1]))) < len(str(abs(hy))))
                     if not far:
                         far_since = 0.0
-                    else:
+                    elif not dropped:
                         if far_since == 0.0:
                             far_since = time.time()
                         if time.time() - far_since >= LEASH_CONFIRM_SEC:   # hors-range confirmé
                             far_since = 0.0
                             return_home(sct, mon, w, h)   # stoppe le spam et rentre
                             continue
+                    # far and dropped -> misread probable : on ignore (far_since inchange)
             for vk in SPELL_KEYS:                 # spam des sorts
                 if not state["running"]:
                     break
