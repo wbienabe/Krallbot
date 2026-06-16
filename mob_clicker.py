@@ -680,6 +680,15 @@ def action_loop():
 def main():
     root = tk.Tk()
     root.title("KrallBot")
+    # icone Kimbolar (barre de titre + barre des taches). Embarquee dans l'.exe via
+    # datas -> extraite dans sys._MEIPASS ; en dev elle est a cote du .py. Jamais bloquant.
+    try:
+        _icodir = getattr(sys, "_MEIPASS", BASE_DIR)
+        _ico = os.path.join(_icodir, "Kimbolar.ico")
+        if os.path.exists(_ico):
+            root.iconbitmap(_ico)
+    except Exception:
+        pass
     root.configure(bg=C_EDGE)
     root.attributes("-topmost", True)
     root.geometry("280x345+20+20")
