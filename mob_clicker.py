@@ -45,9 +45,9 @@ RETURN_FRAC = 0.9          # clic loin = 90% du chemin vers le bord (gros pas mo
 RETURN_FRAC_NEAR = 0.45    # clic moins loin quand on approche (pas de depassement)
 RETURN_STEPS = 10          # nb max de clics pour rentrer
 VK_HIDE = 0x56             # touche 'v' maintenue pendant le retour (cache les mobs)
-KEY_DELAY = 0.04           # délai entre touches de sort (comme ton AHK)
+KEY_DELAY = 0.09           # délai entre touches de sort (plus haut = spam plus lent)
 # touches de sorts = AZERTY & é " ' ( - _  (slots 1,2,3,4,5,6,8)
-SPELL_KEYS = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x38]
+SPELL_KEYS = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]
 WHITE_MIN = 220           # nom de mob = blanc PUR (coeur 255) ; neige/glace/quête plafonnent ~207-214
 GRAY_TOL = 32              # écart max entre R/G/B : un nom de mob est BLANC (peu saturé)
 NAME_CLICK_DROP = 45       # clic X px sous le nom (sur le corps du mob)
@@ -92,6 +92,8 @@ COORD_MAX = 30000   # |coord| plausible ; au-dela = misread OCR -> rejeté
 COORD_STEP = 600    # saut max plausible entre 2 lectures (~0.6 s) ; au-dela = misread/téléport
 COORD_ANCHOR_MIN = 3  # un saut n'est cru qu'apres 3 lectures cohérentes d'affilée (anti-misread)
 LEASH_CONFIRM_SEC = 1.5  # il faut rester hors-range au moins ça avant de rentrer (anti-spike)
+MAX_STEP = 60       # deplacement max plausible en une lecture (~0.6 s). Plus = OCR qui derape
+                    # (chiffre perdu/gonfle, ex: 3 m -> 3007 m) -> lecture ignoree pour la laisse
 DIGIT_TPL = {
     "0": ".###.#...##...##...##...##...##...##...#.###.",
     "1": "...##..#####.##...##...##...##...##...##...##",
@@ -117,11 +119,12 @@ C_GOLD_DIM = "#9c7b2e"     # or terni (légende)
 C_PARCH = "#e6d6b0"        # parchemin (texte info)
 C_RUN = "#f2c94c"          # or vif (en cours)
 C_STOP = "#c0552c"         # rouge brique (arrêté)
+C_SPAM = "#5aa9c9"         # bleu (mode spam seul)
 # ----------------------------------------------------------------------------
 
-state = {"running": False, "target": None, "attacks": 0, "selects": 0,
+state = {"running": False, "spam": False, "target": None, "attacks": 0, "selects": 0,
          "blobs": 0, "winrect": None, "giant": False, "gold": 0,
-         "period": SELECT_PERIOD, "xy": ("--", "--"),
+         "period": SELECT_PERIOD, "xy": ("--", "--"), "pos": None,
          "leash": LEASH_RANGE, "home": None, "returning": False, "ret_dir": 0,
          "leash_on": True}
 _stop = False
@@ -149,6 +152,18 @@ def press_key(vk):
     user32.keybd_event(vk, 0, 0, 0)
     time.sleep(0.01)
     user32.keybd_event(vk, 0, 2, 0)
+
+
+_spam_i = 0
+
+
+def fire_spell():
+    """Presse le sort suivant de la rotation (sert à garder le spam continu)."""
+    global _spam_i
+    vk = SPELL_KEYS[_spam_i % len(SPELL_KEYS)]
+    _spam_i += 1
+    press_key(vk)
+    state["attacks"] += 1
 
 
 def key_down(vk):
@@ -429,8 +444,19 @@ def save_debug(img, w, h, exclude_rects=()):
 
 
 def toggle():
+    """F8 : mode complet (sélection + clic + retour)."""
     state["running"] = not state["running"]
+    if state["running"]:
+        state["spam"] = False                     # exclusif avec le mode spam
     winsound.Beep(880 if state["running"] else 350, 120)
+
+
+def toggle_spam():
+    """F6 : spam seul (juste marteler les sorts, aucune sélection/clic/retour)."""
+    state["spam"] = not state["spam"]
+    if state["spam"]:
+        state["running"] = False                  # exclusif avec le mode complet
+    winsound.Beep(660 if state["spam"] else 350, 120)
 
 
 def load_period():
@@ -483,17 +509,21 @@ def save_return_on(on):
 
 
 def hotkey_loop():
-    """Fast, dedicated F8/F7/F10 polling so a quick press is never missed."""
+    """Fast, dedicated F8/F6/F7 polling so a quick press is never missed."""
     global _stop
     sct = mss.MSS()
     mon = sct.monitors[1]
     w, h = mon["width"], mon["height"]
-    pf8 = pf7 = False
+    pf8 = pf9 = pf7 = False
     while not _stop:
         f8 = key_down(0x77)
         if f8 and not pf8:
             toggle()
         pf8 = f8
+        f6 = key_down(0x75)                        # F6 = spam seul
+        if f6 and not pf9:
+            toggle_spam()
+        pf9 = f6
         f7 = key_down(0x76)
         if f7 and not pf7:
             try:
@@ -599,39 +629,57 @@ def action_loop():
     giant_since = 0.0                             # depuis quand on est verrouillé sur un giant
     giant_seen = 0.0                              # dernière fois que l'icône de rang a été vue
     far_since = 0.0                               # depuis quand on est hors-range (0 = dedans)
+    last_good = None                              # derniere position de confiance (anti-saut OCR)
     recent = []                                   # dernières positions cliquées
     while not _stop:
-        if not state["running"]:
+        if not state["running"] and not state["spam"]:
             state["home"] = None                  # re-ancre la maison au prochain Start
             state["giant"] = False                # libère le verrou giant
             far_since = 0.0
+            last_good = None
+            state["pos"] = None
             time.sleep(0.04)
+            continue
+        if state["spam"]:                         # F6 : spam seul, rien d'autre
+            for vk in SPELL_KEYS:
+                if not state["spam"]:
+                    break
+                press_key(vk)
+                state["attacks"] += 1
+                time.sleep(KEY_DELAY)
             continue
         try:
             # ancre la maison au demarrage, puis surveille la laisse (si activee)
             cur = _xy_num()
             if cur:
                 if state["home"] is None:
-                    state["home"] = cur
+                    state["home"] = cur                   # ancre la maison au demarrage
+                    last_good = cur
+                    state["pos"] = cur
                 elif state["leash_on"]:
-                    hx, hy = state["home"]
-                    far = (cur[0] - hx) ** 2 + (cur[1] - hy) ** 2 > state["leash"] ** 2
-                    # garde anti "chiffre perdu" : une coord avec MOINS de chiffres que la
-                    # maison (ex: -827 lu au lieu de -1877) = OCR qui a saute un chiffre, pas
-                    # un vrai eloignement -> on ignore, sinon on rentrerait a tort. Un vrai
-                    # deplacement garde le meme nombre de chiffres.
-                    dropped = (len(str(abs(cur[0]))) < len(str(abs(hx)))
-                               or len(str(abs(cur[1]))) < len(str(abs(hy))))
-                    if not far:
-                        far_since = 0.0
-                    elif not dropped:
-                        if far_since == 0.0:
-                            far_since = time.time()
-                        if time.time() - far_since >= LEASH_CONFIRM_SEC:   # hors-range confirmé
+                    if last_good is None:
+                        last_good = cur
+                    # garde "vitesse" : on ne peut pas bouger de plus de MAX_STEP en une lecture
+                    # (~0.6 s). Saut plus grand = OCR qui derape (chiffre perdu OU gonfle, ex.
+                    # 3 m -> 3007 m) -> on IGNORE la lecture, sinon on rentrerait a tort. La vraie
+                    # position revient vite et last_good la suit pas a pas.
+                    step = ((cur[0] - last_good[0]) ** 2 + (cur[1] - last_good[1]) ** 2) ** 0.5
+                    if step <= MAX_STEP:                  # mouvement plausible -> on fait confiance
+                        last_good = cur
+                        state["pos"] = cur
+                        hx, hy = state["home"]
+                        far = (cur[0] - hx) ** 2 + (cur[1] - hy) ** 2 > state["leash"] ** 2
+                        if not far:
                             far_since = 0.0
-                            return_home(sct, mon, w, h)   # stoppe le spam et rentre
-                            continue
-                    # far and dropped -> misread probable : on ignore (far_since inchange)
+                        else:
+                            if far_since == 0.0:
+                                far_since = time.time()
+                            if time.time() - far_since >= LEASH_CONFIRM_SEC:   # hors-range confirmé
+                                far_since = 0.0
+                                last_good = None           # re-synchronise apres le retour
+                                return_home(sct, mon, w, h)   # stoppe le spam et rentre
+                                continue
+                    # step > MAX_STEP -> saut impossible = glitch OCR : on ignore (rien ne bouge)
             for vk in SPELL_KEYS:                 # spam des sorts
                 if not state["running"]:
                     break
@@ -658,7 +706,9 @@ def action_loop():
                     recent[:] = recent[-RECENT_KEEP:]   # garde les 2 dernières
                     gc = 0                              # scrute le rang : la fenêtre de cible tarde parfois
                     for _ in range(GIANT_CONFIRM_TRIES):
-                        time.sleep(0.1)
+                        if state["running"]:            # garde le spam continu pendant l'attente OCR
+                            fire_spell()
+                        time.sleep(0.09)
                         gc = _giant_gold(np.array(sct.grab(mon))[:, :, :3][:, :, ::-1], w, h)
                         if gc >= GIANT_GOLD_MIN:
                             break
@@ -674,6 +724,13 @@ def action_loop():
 
 # ---- GUI -------------------------------------------------------------------
 def main():
+    # AppUserModelID explicite -> la barre des taches rattache la fenetre a NOTRE appli (et donc
+    # a l'icone Kimbolar), au lieu de l'icone pythonw.exe par defaut quand on lance par python
+    # direct (BOT_SELECT.bat). A poser AVANT toute fenetre. Jamais bloquant.
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("KrallBot.AMK")
+    except Exception:
+        pass
     root = tk.Tk()
     root.title("KrallBot")
     # icone Kimbolar (barre de titre + barre des taches). Embarquee dans l'.exe via
@@ -764,10 +821,16 @@ def main():
     info = tk.Label(panel, text="", bg=C_PANEL, fg=C_PARCH,
                     font=("Consolas", 9), justify="left")
     info.pack(pady=2)
-    btn = tk.Button(panel, text="START  (F8)", bg=C_EDGE, fg="#2c1d0c",
+    brow = tk.Frame(panel, bg=C_PANEL)
+    brow.pack(pady=6)
+    btn = tk.Button(brow, text="START  (F8)", bg=C_EDGE, fg="#2c1d0c",
                     activebackground=C_GOLD, relief="flat", bd=0,
                     font=("Segoe UI Semibold", 10), command=toggle)
-    btn.pack(pady=6, ipadx=6, ipady=2)
+    btn.pack(side="left", padx=3, ipadx=6, ipady=2)
+    sbtn = tk.Button(brow, text="SPAM  (F6)", bg=C_EDGE, fg="#2c1d0c",
+                     activebackground=C_GOLD, relief="flat", bd=0,
+                     font=("Segoe UI Semibold", 10), command=toggle_spam)
+    sbtn.pack(side="left", padx=3, ipadx=6, ipady=2)
 
     threading.Thread(target=hotkey_loop, daemon=True).start()
     threading.Thread(target=action_loop, daemon=True).start()
@@ -780,17 +843,27 @@ def main():
         state["winrect"] = (root.winfo_rootx(), root.winfo_rooty(),
                             root.winfo_width(), root.winfo_height())
         on = state["running"]
+        spam = state["spam"]
         if state.get("returning"):
             st.config(text="↩ GOING BACK", fg=C_GOLD)
+        elif spam:
+            st.config(text="● SPAM", fg=C_SPAM)
         else:
             st.config(text="● Fakiring" if on else "● STOPPED",
                       fg=C_RUN if on else C_STOP)
         btn.config(text="STOP  (F8)" if on else "START  (F8)",
                    bg=C_STOP if on else C_EDGE,
                    fg="#f0e6c8" if on else "#2c1d0c")
-        xy = state.get("xy", ("--", "--"))
-        xy_lbl.config(text=f"X: {xy[0]}   Y: {xy[1]}")
-        cur, hm = _xy_num(), state.get("home")
+        sbtn.config(text="STOP  (F6)" if spam else "SPAM  (F6)",
+                    bg=C_SPAM if spam else C_EDGE,
+                    fg="#f0e6c8" if spam else "#2c1d0c")
+        pos = state.get("pos")                    # position de confiance (filtree anti-saut)
+        if pos:
+            xy_lbl.config(text=f"X: {pos[0]}   Y: {pos[1]}")
+        else:
+            xy = state.get("xy", ("--", "--"))
+            xy_lbl.config(text=f"X: {xy[0]}   Y: {xy[1]}")
+        cur, hm = pos or _xy_num(), state.get("home")
         if cur and hm:
             hd = int(((cur[0] - hm[0]) ** 2 + (cur[1] - hm[1]) ** 2) ** 0.5)
             far = hd >= state["leash"]
