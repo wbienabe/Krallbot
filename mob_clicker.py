@@ -767,9 +767,14 @@ def main():
     tk.Label(prow, text="select (ms)", bg=C_PANEL, fg=C_GOLD_DIM,
              font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
     ms_var = tk.StringVar(value=str(load_period()))
+
+    def _only_digits(proposed):
+        return proposed == "" or proposed.isdigit()
+    _vcmd = (root.register(_only_digits), "%P")
     ms_entry = tk.Entry(prow, textvariable=ms_var, justify="center", bg=C_BG,
                         fg=C_GOLD, insertbackground=C_GOLD, relief="flat", bd=2,
-                        width=6, font=("Consolas", 10))
+                        width=6, font=("Consolas", 10),
+                        validate="key", validatecommand=_vcmd)
     ms_entry.pack(side="left")
 
     def apply_ms(*_):
